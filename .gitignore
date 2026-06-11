@@ -1,0 +1,22 @@
+# Large local artifacts
+models/*.gguf
+archives/*.zip
+
+# Extracted runtime
+runtime/
+llama-bin/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.old
+
+# Windows metadata
+Thumbs.db
+Desktop.ini
+
+# Editor metadata
+.vscode/
+.idea/
+*.code-workspace
