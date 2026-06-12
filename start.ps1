@@ -12,6 +12,12 @@ param(
     [Nullable[int]]$ParallelSlots,
     [Nullable[int]]$ThreadsHttp,
     [Nullable[int]]$Priority,
+    [string]$ModelPath,
+    [string]$MmprojPath,
+    [string]$ModelAlias,
+    [string]$ModelTags,
+    [Nullable[int]]$ImageMinTokens,
+    [Nullable[int]]$ImageMaxTokens,
 
     [ValidateSet("auto", "on", "off")]
     [string]$FlashAttention,
@@ -73,6 +79,62 @@ function Resolve-OptionalIntSetting {
 
     Write-Warning "Ignoring invalid $Name=$raw."
     return $null
+}
+
+function Resolve-OptionalStringSetting {
+    param([string]$Name)
+
+    $raw = [Environment]::GetEnvironmentVariable($Name)
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        return $null
+    }
+
+    return $raw.Trim()
+}
+
+function Resolve-FileSetting {
+    param(
+        [string]$Value,
+        [string]$Description
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        throw "Missing $Description file path."
+    }
+
+    $candidatePaths = @()
+    if ([System.IO.Path]::IsPathRooted($Value)) {
+        $candidatePaths += $Value
+    } else {
+        $candidatePaths += (Join-Path $Root $Value)
+        $candidatePaths += (Join-Path $ModelsDir $Value)
+    }
+
+    foreach ($candidatePath in ($candidatePaths | Select-Object -Unique)) {
+        if (Test-Path -LiteralPath $candidatePath -PathType Leaf) {
+            return Get-Item -LiteralPath $candidatePath
+        }
+    }
+
+    throw "Cannot find $Description file: $Value"
+}
+
+function Get-DefaultModelAlias {
+    param(
+        [System.IO.FileInfo]$ModelFile,
+        [bool]$VisionEnabled
+    )
+
+    $alias = [System.IO.Path]::GetFileNameWithoutExtension($ModelFile.Name)
+    if ($alias -match "^(?<base>.+)-Q[0-9].*$") {
+        $alias = $Matches["base"]
+    }
+
+    if ($VisionEnabled -and $alias -notmatch "(?i)(vision|vl|multimodal|image)") {
+        $alias = "$alias-vision"
+    }
+
+    return $alias
 }
 
 function Normalize-OptimizeMode {
@@ -649,17 +711,35 @@ if ($null -eq $ContextSize) {
     $ContextSize = Resolve-IntSetting "LLAMA_CTX_SIZE" (Get-DefaultContextSize $OptimizeMode)
 }
 
-$models = @(
-    Get-ChildItem -LiteralPath $Root -Recurse -Filter "*.gguf" -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -notlike "mmproj-*" } |
-        Sort-Object DirectoryName, Name
-)
-
-if ($models.Count -eq 0) {
-    throw "No model .gguf files found in $Root."
+$modelOverride = $ModelPath
+if ([string]::IsNullOrWhiteSpace($modelOverride)) {
+    $modelOverride = Resolve-OptionalStringSetting "LLAMA_MODEL"
+}
+if ([string]::IsNullOrWhiteSpace($modelOverride)) {
+    $modelOverride = Resolve-OptionalStringSetting "LLAMA_ARG_MODEL"
 }
 
-$model = Select-File -Files $models -Title "Available models:"
+if (-not [string]::IsNullOrWhiteSpace($modelOverride)) {
+    $model = Resolve-FileSetting -Value $modelOverride -Description "model"
+    if ($model.Extension -ne ".gguf") {
+        throw "Model file must be a .gguf file: $($model.FullName)"
+    }
+    if ($model.Name -like "mmproj-*") {
+        throw "Model file cannot be an mmproj file: $($model.FullName)"
+    }
+} else {
+    $models = @(
+        Get-ChildItem -LiteralPath $Root -Recurse -Filter "*.gguf" -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notlike "mmproj-*" } |
+            Sort-Object DirectoryName, Name
+    )
+
+    if ($models.Count -eq 0) {
+        throw "No model .gguf files found in $Root."
+    }
+
+    $model = Select-File -Files $models -Title "Available models:"
+}
 
 $autoTuneEnabled = -not $NoAutoTune
 $systemProfile = $null
@@ -772,27 +852,101 @@ if (-not [string]::IsNullOrWhiteSpace($env:LLAMA_NO_MMPROJ)) {
     $disableMmproj = $env:LLAMA_NO_MMPROJ -notin @("0", "false", "False", "FALSE")
 }
 
+$mmproj = $null
 if (-not $disableMmproj) {
-    $mmprojFiles = @(
-        Get-ChildItem -LiteralPath $Root -Recurse -Filter "mmproj*.gguf" -File -ErrorAction SilentlyContinue |
-            Sort-Object DirectoryName, Name
-    )
+    $mmprojOverride = $MmprojPath
+    if ([string]::IsNullOrWhiteSpace($mmprojOverride)) {
+        $mmprojOverride = Resolve-OptionalStringSetting "LLAMA_MMPROJ"
+    }
+    if ([string]::IsNullOrWhiteSpace($mmprojOverride)) {
+        $mmprojOverride = Resolve-OptionalStringSetting "LLAMA_ARG_MMPROJ"
+    }
 
-    if ($mmprojFiles.Count -eq 1) {
-        $mmproj = $mmprojFiles[0]
+    if (-not [string]::IsNullOrWhiteSpace($mmprojOverride)) {
+        $mmproj = Resolve-FileSetting -Value $mmprojOverride -Description "mmproj"
+        if ($mmproj.Extension -ne ".gguf") {
+            throw "mmproj file must be a .gguf file: $($mmproj.FullName)"
+        }
         Write-Host "Using mmproj: $($mmproj.Name)"
         $arguments += @("--mmproj", $mmproj.FullName)
-    } elseif ($mmprojFiles.Count -gt 1) {
-        $mmproj = Select-File -Files $mmprojFiles -Title "Available mmproj files:"
-        $arguments += @("--mmproj", $mmproj.FullName)
+    } else {
+        $mmprojFiles = @(
+            Get-ChildItem -LiteralPath $Root -Recurse -Filter "mmproj*.gguf" -File -ErrorAction SilentlyContinue |
+                Sort-Object DirectoryName, Name
+        )
+
+        if ($mmprojFiles.Count -eq 1) {
+            $mmproj = $mmprojFiles[0]
+            Write-Host "Using mmproj: $($mmproj.Name)"
+            $arguments += @("--mmproj", $mmproj.FullName)
+        } elseif ($mmprojFiles.Count -gt 1) {
+            $mmproj = Select-File -Files $mmprojFiles -Title "Available mmproj files:"
+            $arguments += @("--mmproj", $mmproj.FullName)
+        }
     }
 
-    if ($mmproj -and $autoTuneEnabled -and $autoTune.MmprojOffload) {
-        $arguments += @("--mmproj-offload")
+    if ($mmproj) {
+        if ($autoTuneEnabled) {
+            if ($autoTune.MmprojOffload) {
+                $arguments += @("--mmproj-offload")
+            } else {
+                $arguments += @("--no-mmproj-offload")
+            }
+        }
+
+        if ($null -eq $ImageMinTokens) {
+            $ImageMinTokens = Resolve-OptionalIntSetting "LLAMA_IMAGE_MIN_TOKENS"
+        }
+
+        if ($null -eq $ImageMaxTokens) {
+            $ImageMaxTokens = Resolve-OptionalIntSetting "LLAMA_IMAGE_MAX_TOKENS"
+        }
+
+        if ($null -ne $ImageMinTokens) {
+            $arguments += @("--image-min-tokens", $ImageMinTokens.ToString())
+        }
+
+        if ($null -ne $ImageMaxTokens) {
+            $arguments += @("--image-max-tokens", $ImageMaxTokens.ToString())
+        }
+    } else {
+        Write-Warning "No mmproj file was loaded. Image requests will be rejected as non-vision-capable."
     }
+} else {
+    Write-Warning "LLAMA_NO_MMPROJ disables vision. Image requests will be rejected as non-vision-capable."
 }
 
 if ($Mode -eq "server") {
+    $serverAlias = $ModelAlias
+    if ([string]::IsNullOrWhiteSpace($serverAlias)) {
+        $serverAlias = Resolve-OptionalStringSetting "LLAMA_MODEL_ALIAS"
+    }
+    if ([string]::IsNullOrWhiteSpace($serverAlias)) {
+        $serverAlias = Resolve-OptionalStringSetting "LLAMA_ARG_ALIAS"
+    }
+    if ([string]::IsNullOrWhiteSpace($serverAlias) -and $mmproj) {
+        $serverAlias = Get-DefaultModelAlias -ModelFile $model -VisionEnabled $true
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($serverAlias)) {
+        $arguments += @("-a", $serverAlias)
+    }
+
+    $serverTags = $ModelTags
+    if ([string]::IsNullOrWhiteSpace($serverTags)) {
+        $serverTags = Resolve-OptionalStringSetting "LLAMA_MODEL_TAGS"
+    }
+    if ([string]::IsNullOrWhiteSpace($serverTags)) {
+        $serverTags = Resolve-OptionalStringSetting "LLAMA_ARG_TAGS"
+    }
+    if ([string]::IsNullOrWhiteSpace($serverTags) -and $mmproj) {
+        $serverTags = "vision,multimodal,image"
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($serverTags)) {
+        $arguments += @("--tags", $serverTags)
+    }
+
     if ($autoTuneEnabled) {
         $arguments += @("--cont-batching")
     }
@@ -816,6 +970,19 @@ if ($Mode -eq "server") {
 }
 
 Write-Host "Model: $($model.FullName)"
+if ($mmproj) {
+    Write-Host "Vision: enabled with mmproj $($mmproj.FullName)"
+} else {
+    Write-Host "Vision: disabled"
+}
+
+if ($Mode -eq "server" -and -not [string]::IsNullOrWhiteSpace($serverAlias)) {
+    Write-Host "API model alias: $serverAlias"
+}
+
+if ($Mode -eq "server" -and -not [string]::IsNullOrWhiteSpace($serverTags)) {
+    Write-Host "API model tags: $serverTags"
+}
 
 if ($autoTuneEnabled) {
     Write-Host ""
