@@ -26,6 +26,7 @@ param(
     [string]$OptimizeMode = "balanced",
 
     [switch]$NoAutoTune,
+    [switch]$NoOpenWebUI,
     [switch]$DryRun
 )
 
@@ -197,6 +198,44 @@ function Quote-CommandArgument {
     }
 
     return '"' + ($Value -replace '"', '\"') + '"'
+}
+
+function Start-WebUiOpener {
+    param([string]$Url)
+
+    $escapedUrl = $Url -replace "'", "''"
+    $script = @"
+`$ErrorActionPreference = "SilentlyContinue"
+`$url = '$escapedUrl'
+
+for (`$i = 0; `$i -lt 300; `$i++) {
+    try {
+        `$response = Invoke-WebRequest -UseBasicParsing -Uri `$url -TimeoutSec 2
+        if (`$response.StatusCode -ge 200) {
+            Start-Process `$url
+            exit 0
+        }
+    } catch {
+        Start-Sleep -Seconds 1
+    }
+}
+
+Start-Process `$url
+"@
+
+    $encodedCommand = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($script))
+    $powershellExe = (Get-Command "powershell.exe" -ErrorAction SilentlyContinue).Source
+    if ([string]::IsNullOrWhiteSpace($powershellExe)) {
+        $powershellExe = "powershell.exe"
+    }
+
+    Start-Process -FilePath $powershellExe -ArgumentList @(
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-EncodedCommand",
+        $encodedCommand
+    ) -WindowStyle Hidden | Out-Null
 }
 
 function Select-File {
@@ -917,6 +956,7 @@ if (-not $disableMmproj) {
 }
 
 if ($Mode -eq "server") {
+    $serverUrl = "http://127.0.0.1:$Port"
     $serverAlias = $ModelAlias
     if ([string]::IsNullOrWhiteSpace($serverAlias)) {
         $serverAlias = Resolve-OptionalStringSetting "LLAMA_MODEL_ALIAS"
@@ -962,7 +1002,7 @@ if ($Mode -eq "server") {
     $arguments += @("--host", "127.0.0.1", "--port", $Port.ToString())
     Write-Host ""
     Write-Host "Starting llama-server..."
-    Write-Host "URL: http://127.0.0.1:$Port"
+    Write-Host "URL: $serverUrl"
 } else {
     $arguments += @("-cnv")
     Write-Host ""
@@ -1010,6 +1050,12 @@ if ($DryRun) {
     Write-Host "Dry run only. Command:"
     Write-Host $commandLine
     exit 0
+}
+
+if ($Mode -eq "server" -and -not $NoOpenWebUI) {
+    Start-WebUiOpener -Url $serverUrl
+    Write-Host "WebUI will open automatically when ready."
+    Write-Host ""
 }
 
 & $exePath @arguments

@@ -34,6 +34,7 @@ The launcher asks for:
 2. Model file
 
 Press Enter at the optimization prompt to use `balanced`.
+After the server is ready, the launcher opens the WebUI in your default browser.
 
 ## Optimization Modes
 
@@ -50,12 +51,14 @@ Press Enter at the optimization prompt to use `balanced`.
 .\start.ps1
 .\start.ps1 -Mode cli
 .\start.ps1 -DryRun
+.\start.ps1 -NoOpenWebUI
 .\start.ps1 -OptimizeMode speed
 .\start.ps1 -OptimizeMode vram -ContextSize 4096
 .\start.ps1 -ModelPath .\models\Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_P.gguf -MmprojPath .\models\mmproj-Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-f16.gguf
 ```
 
 `-DryRun` prints the generated llama.cpp command without loading the model.
+`-NoOpenWebUI` starts the server without opening a browser.
 
 ## Vision / Image Requests
 
